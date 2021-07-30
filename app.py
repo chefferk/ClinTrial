@@ -2,80 +2,111 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 import pandas as pd
-
-query = st.text_input("Query")
-search = st.button("Search")
-
-
-def search_button_pressed():
-    ...
+from OpenFDA import OpenFDA
 
 
 def query_fda(term):
-    r = requests.get(f"https://api.fda.gov/drug/drugsfda.json?search={term}&limit=100")
-    data = r.json()
+    ofda = OpenFDA(term)
+    ndas = ofda.get_ndas()
 
-    d = data["results"][0]["submissions"]
-    df = pd.DataFrame.from_dict(d)
-    df["submission_number"] = df["submission_number"].astype(str).astype(int)
-    df = df.sort_values("submission_number")
+    if len(ndas) == 0:
+        print("No NDAs")
+        return []
 
-    for i in df.iloc[-1].application_docs:
-        if i["type"] == "Label":
-            return i["url"]
-        else:
-            return "No label"
+    correct = ofda.get_correct_result(ndas, dose=60, route="INTRAVENOUS")
+
+    if len(correct) == 0:
+        print("None correct")
+        labels = []
+        for res in ndas:
+            latest = ofda.get_latest_submission(res)
+
+            if type(latest) is list:
+                latest = latest[0]
+
+            label = ofda.get_label_link(latest)
+
+            if label is not None:
+                labels.append(label)
+        return labels
+
+    print(f"Number correct: {len(correct)}")
+
+    labels = []
+    for res in correct:
+        latest = ofda.get_latest_submission(res)
+
+        if type(latest) is list:
+            latest = latest[0]
+
+        label = ofda.get_label_link(latest)
+
+        if label is not None:
+            labels.append(label)
+    return labels
 
 
-def get_data(query):
-    # f"https://www.clinicaltrials.gov/api/query/full_studies?expr={query}&min_rnk=1&max_rnk=2&fmt=json"
+def query_clin_trials():
+    if st.session_state.query_value == "":
+        return None
+
     r = requests.get(
-        f"https://www.clinicaltrials.gov/api/query/full_studies?expr={query}&min_rnk=1&max_rnk=10&fmt=json"
+        f"https://www.clinicaltrials.gov/api/query/full_studies?expr={st.session_state.query_value}&min_rnk=1&max_rnk=5&fmt=json&rslt=With"
     )
-    print(r.status_code)
 
-    data = r.json()
+    if r.status_code != 200:
+        st.warning("ERROR: Could not run query")
+        return
 
-    print(r.url)
+    return r.json()
 
+
+def process_data(data):
+    st.markdown(
+        f"`Total studies found: {data['FullStudiesResponse']['NStudiesFound']}`"
+    )
+    st.markdown(
+        f"`Total studies showing: {data['FullStudiesResponse']['NStudiesReturned']}`"
+    )
+    st.markdown("""---""")
     for i in range(len(data["FullStudiesResponse"]["FullStudies"])):
 
         temp_data = data["FullStudiesResponse"]["FullStudies"][i]["Study"]
 
         # header
         nctid = temp_data["ProtocolSection"]["IdentificationModule"]["NCTId"]
-        st.write(f"[{nctid}](https://clinicaltrials.gov/ct2/show/{nctid})")
+        st.markdown(f"### [{nctid}](https://clinicaltrials.gov/ct2/show/{nctid})")
 
         title = temp_data["ProtocolSection"]["IdentificationModule"]["BriefTitle"]
         st.write(title)
 
         # interventions
-        st.write("Drugs:")
+        st.markdown("#### Interventions:")
         try:
             l = temp_data["ProtocolSection"]["ArmsInterventionsModule"][
                 "InterventionList"
             ]["Intervention"]
 
-            print(" ")
-            print(l)
-            print(" ")
             for k in l:
                 # print(k["InterventionName"])
                 dname = k["InterventionName"]
-                # link = query_fda(dname)
-                link = "#"
+                try:
+                    links = list(set(query_fda(dname)))
+                except Exception as e:
+                    links = ["No label"]
+                # link = "#"
 
-                print(dname, link)
+                intervention_type = k["InterventionType"]
 
-                if link != "No label":
-                    st.write(f"- [{dname}] ({link})")
-                else:
-                    st.write(f"- {dname} (no label)")
+                links = [f"[label] ({link})" for link in links if link != "No label"]
+
+                st.write(f"- {intervention_type}: {dname} ({', '.join(links)})")
+
         except Exception as e:
             ...
 
         # refs
-        st.write("References:")
+        st.markdown("#### References:")
         try:
             refs = temp_data["ProtocolSection"]["ReferencesModule"]["ReferenceList"][
                 "Reference"
@@ -95,5 +126,28 @@ def get_data(query):
         st.markdown("""---""")
 
 
-if search:
-    get_data(query)
+if __name__ == "__main__":
+
+    st.title("ClinTrials")
+
+    query_value = st.text_input(
+        "Query",
+        key="query_value",
+        help="Seperate multiple items by commas",
+        on_change=None,
+    )
+
+    # st.selectbox(
+    #     "Study Results",
+    #     ["All Studies", "Studies With Results", "Studies Without Results"],
+    # )
+
+    search = st.button("Search")
+
+    if search:
+        data = query_clin_trials()
+
+        if data is not None and data["FullStudiesResponse"]["NStudiesReturned"] != 0:
+            process_data(data)
+        else:
+            st.warning("No results found")
